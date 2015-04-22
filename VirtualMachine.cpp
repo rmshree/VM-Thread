@@ -3,7 +3,7 @@
 #include "Machine.h"
 
 extern "C"{
-
+//:{D
 int volatile counter;
 
 void AlarmCB(void *param){
