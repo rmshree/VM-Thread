@@ -475,6 +475,9 @@ void MachineFileRead(int fd, void *data, int length, TMachineFileCallback callba
         MachineResumeSignals(&SignalState);
     }
 }
+//Machinefilewrite-> Allthreads(vmcurrID->currentstate = waiting[in a q], VMSched, filereturn of thread = ID, <0 stat failure, then put to 0
+//class thread, file ret val as param in callback, whe q is ready to add pass new thread ID, and scheduler
+//call back inside class
 
 void MachineFileWrite(int fd, void *data, int length, TMachineFileCallback callback, void *calldata){
     if(MachineInitialized){
