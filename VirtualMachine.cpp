@@ -3,6 +3,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <vector>
+#include <algorithm>
+#include <queue>
 
 extern "C"{
 
@@ -16,8 +18,9 @@ typedef void (*TVMThreadEntry)(void *);
 class TCB{
 	public:
 
-	TCB(TVMThreadIDRef ID1, TVMThreadPriority prior, int memsize, TVMThreadEntry entry1, void *param1); 
-	TVMThreadIDRef ID;
+	TCB(){};
+	TCB(TVMThreadPriority prior, int memsize, TVMThreadEntry entry1, void *param1); 
+	TVMThreadID ID;
 	TVMStatus state;	
 	TVMThreadPriority priority;
 	int st_size;
@@ -28,19 +31,28 @@ class TCB{
 	SMachineContext MachineContext; 	
 };
 
-TCB:: TCB(TVMThreadIDRef ID1, TVMThreadPriority prior, int memsize, TVMThreadEntry entry1, void *param1){
-	ID = ID1;
+
+TCB running;
+//vector <TVMThreadID> tid_tcb;
+vector <TCB> v_tcb;
+
+queue <TCB> high;
+queue <TCB> medium;
+queue <TCB> low;
+
+queue <TCB> waiting;
+queue <TCB> sleeping;
+
+TCB:: TCB(TVMThreadPriority prior, int memsize, TVMThreadEntry entry1, void *param1){
 	priority = prior;
 	state = VM_THREAD_STATE_DEAD;
 	int st_size = memsize;
 	StackBase = new uint8_t[memsize];
 	entry = entry1;
-	*(void *)param = *(void *)param1;
+	//*(void *)param = *(void *)param1;
 	num_ticks = ticks;
 }
 
-vector <TVMThreadIDRef> tid_tcb;  
-vector <TCB> v_tcb;
 
 TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsize, TVMThreadPriority prio, TVMThreadIDRef tid){
 
@@ -51,8 +63,10 @@ TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsiz
 	
 	else{
 		MachineSuspendSignals(&OldState);
-		TCB block(tid, prio, memsize, entry, param);
-		tid_tcb.push_back(tid);
+		TCB block(prio, memsize, entry, param);
+		*tid = v_tcb.size();
+		block.ID = v_tcb.size();
+		//tid_tcb.push_back(block.ID);
 		v_tcb.push_back(block); 	
 	}
 
@@ -74,7 +88,7 @@ void AlarmCB(void *param){
 }*/
 
 TVMStatus VMThreadSleep(TVMTick tick){
-	counter = 100 * tick;
+	counter = tick;
 
 	if(tick == VM_TIMEOUT_INFINITE)	
 		return VM_STATUS_ERROR_INVALID_PARAMETER;
@@ -89,22 +103,177 @@ TVMStatus VMThreadSleep(TVMTick tick){
 }//ThreadSleep
 
 
+TVMStatus VMThreadDelete(TVMThreadID thread){
+	unsigned int i;
+	for(i = 0; i < v_tcb.size(); i++)
+		if(v_tcb[i].ID == thread)
+			break;
+	
+	if(i == v_tcb.size())
+		return VM_STATUS_ERROR_INVALID_ID;	
+
+	if(v_tcb[i].state != VM_THREAD_STATE_DEAD)
+		return VM_STATUS_ERROR_INVALID_STATE;
+	else
+		v_tcb.erase(v_tcb.begin() + i);	
+	
+	return VM_STATUS_SUCCESS;
+}//ThreadDelete
+
+
+TVMStatus VMThreadActivate(TVMThreadID thread){
+	TMachineSignalState OldState;
+	MachineSuspendSignals(&OldState);
+
+	unsigned int i;
+
+	for(i = 0; i < v_tcb.size(); i++)
+                if(v_tcb[i].ID == thread)
+                        break;
+
+	if(i == v_tcb.size())
+                return VM_STATUS_ERROR_INVALID_ID;
+
+	if(v_tcb[i].state != VM_THREAD_STATE_DEAD)
+                return VM_STATUS_ERROR_INVALID_STATE;
+	
+	v_tcb[i].state = VM_THREAD_STATE_READY;
+
+	if(v_tcb[i].priority == VM_THREAD_PRIORITY_LOW)
+		low.push(v_tcb[i]);
+	if(v_tcb[i].priority == VM_THREAD_PRIORITY_NORMAL)
+                medium.push(v_tcb[i]);
+	else
+                high.push(v_tcb[i]);
+
+	//handle scheduling
+
+	return VM_STATUS_SUCCESS;
+}//ThreadActivate
+
+void Scheduler(TVMThreadID thread){
+	
+}//Scheduler
+
+void pop_queue(TVMThreadID thread, int i){
+	if(v_tcb[i].priority == VM_THREAD_PRIORITY_LOW){
+		queue <TCB> temp;
+		TCB temp1;
+		while(low.size() > 0){
+			temp1 = low.front();
+			low.pop();
+			if(temp1.ID == thread)
+				break;
+			temp.push(temp1);
+		}
+		while(low.size() > 0){
+			temp1 = low.front();
+			low.pop();
+			temp.push(temp1);
+		}	
+		low = temp;
+	}
+	else if(v_tcb[i].priority == VM_THREAD_PRIORITY_NORMAL){
+            	queue <TCB> temp;
+                TCB temp1;
+                while(medium.size() > 0){
+                        temp1 = medium.front();
+                        medium.pop();
+                        if(temp1.ID == thread)
+                                break;
+                        temp.push(temp1);
+                }
+                while(medium.size() > 0){
+                        temp1 = medium.front();
+                        medium.pop();
+                        temp.push(temp1);
+                }
+                medium = temp;
+	}
+        else{ //if(v_tcb[i].priority == VM_THREAD_PRIORITY_HIGH){
+                queue <TCB> temp;
+                TCB temp1;
+                while(high.size() > 0){
+                        temp1 = high.front();
+                        high.pop();
+                        if(temp1.ID == thread)
+                                break;
+                        temp.push(temp1);
+                }
+                while(high.size() > 0){
+                        temp1 = high.front();
+                        high.pop();
+                        temp.push(temp1);
+                }
+                high = temp;
+        }
+}//popqueue
+
+TVMStatus VMThreadTerminate(TVMThreadID thread){
+	unsigned int i;
+
+        for(i = 0; i < v_tcb.size(); i++)
+                if(v_tcb[i].ID == thread)
+                        break;
+
+        if(i == v_tcb.size())
+                return VM_STATUS_ERROR_INVALID_ID;
+
+        if(v_tcb[i].state == VM_THREAD_STATE_DEAD)
+                return VM_STATUS_ERROR_INVALID_STATE;
+
+	pop_queue(thread, i);
+	v_tcb[i].state = VM_THREAD_STATE_DEAD;
+
+	return VM_STATUS_SUCCESS;
+}//ThreadTerminate
+
+
+TVMStatus VMThreadID(TVMThreadIDRef threadref){
+	if(threadref == NULL)
+		return VM_STATUS_ERROR_INVALID_PARAMETER;
+
+	//*threadref = running.ID;
+
+	return VM_STATUS_SUCCESS;
+}//ThreadID
+
+
+TVMStatus VMThreadState(TVMThreadID thread, TVMThreadStateRef state){
+	if(state == NULL)
+		return VM_STATUS_ERROR_INVALID_PARAMETER;
+
+	unsigned int i;
+	
+	for(i = 0; i < v_tcb.size(); i++)
+                if(v_tcb[i].ID == thread)
+                        break;
+	
+        if(i == v_tcb.size())
+                return VM_STATUS_ERROR_INVALID_ID;
+
+	*state = v_tcb[i].state;
+
+	return VM_STATUS_SUCCESS;
+}//ThreadState
+
+
 TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 	const char *arg = argv[0];
 
-	TVMMainEntry ret = VMLoadModule(arg);		
+	TVMMainEntry main = VMLoadModule(arg);		
 	ticks = tickms;
 	
-	MachineInitialize(1000);	
-	MachineRequestAlarm(1000, AlarmCB, NULL);       //FYI could pass in a DataStructure instead of NULL
+	MachineInitialize(tickms);	
+	MachineRequestAlarm(tickms*1000, AlarmCB, NULL);       //FYI could pass in a DataStructure instead of NULL
 	MachineEnableSignals();
 	
 	//TMachineFileCallback callback
 	
-	if(ret == NULL)
+	if(main == NULL)
 		return(VM_STATUS_FAILURE);
 	else{
-		ret(argc, argv);
+		main(argc, argv);
 		return(VM_STATUS_SUCCESS);
 	}
 }//VMStart
