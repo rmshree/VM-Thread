@@ -25,7 +25,7 @@ class TCB{
 	TVMStatus state;	
 	TVMThreadPriority priority;
 	size_t st_size;
-	int num_ticks;	
+	unsigned int num_ticks;	
 	uint8_t *StackBase;
 	TVMThreadEntry entry;
 	void *param;
@@ -33,8 +33,7 @@ class TCB{
 };
 
 
-TCB running;
-//vector <TVMThreadID> tid_tcb;
+TCB *running = new TCB((TVMThreadPriority)NULL, 0, NULL, NULL);
 vector <TCB> v_tcb;
 
 queue <TCB> high;
@@ -43,6 +42,9 @@ queue <TCB> low;
 
 queue <TCB> waiting;
 queue <TCB> sleeping;
+queue <TCB> ready;
+
+void Scheduler(TVMThreadID thread);
 
 TCB:: TCB(TVMThreadPriority prior, size_t memsize, TVMThreadEntry entry1, void *param1){
 	priority = prior;
@@ -55,12 +57,14 @@ TCB:: TCB(TVMThreadPriority prior, size_t memsize, TVMThreadEntry entry1, void *
 	num_ticks = ticks;
 }
 
+
 void Skeleton(void *param){
     //get the entry function and param that you need to call 
-//	ActualThreadEntry(ActualThreadParam);
-//	VMTerminate(ThisThreadID);// This will allow you to gain control back if the ActualThreadEntry returns
+	//entry(ActualThreadParam);
+	VMThreadTerminate(running->ID);// This will allow you to gain control back if the ActualThreadEntry returns
 	cout << "In Skeleton\n";	
-}//SkeletonEntry*/
+}//SkeletonEntry
+
 
 TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsize, TVMThreadPriority prio, TVMThreadIDRef tid){
 
@@ -85,6 +89,17 @@ TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsiz
 TVMMainEntry VMLoadModule(const char *module);
 
 void AlarmCB(void *param){
+	queue <TCB> temp;
+	for(unsigned int i = 0; i < sleeping.size(); i++){	
+		sleeping.pop();
+		for(unsigned int j = 0; j < sleeping.front().num_ticks; j++){
+			sleeping.front().num_ticks--;
+			temp.push(sleeping.front());
+		}
+	}
+	sleeping = temp;
+	//call Scheduler (?)
+
 	counter--;   //need count down timers for each sleeping thread (?)      
 }//AlarmCB
 
@@ -128,14 +143,13 @@ TVMStatus VMThreadDelete(TVMThreadID thread){
 	return VM_STATUS_SUCCESS;
 }//ThreadDelete
 
-void Scheduler(TVMThreadID thread);
 
-SMachineContext global_new_context;
+//SMachineContext global_new_context;
 
 TVMStatus VMThreadActivate(TVMThreadID thread){
 	TMachineSignalState OldState;
 	MachineSuspendSignals(&OldState);
-	SMachineContext curr_context;
+	//SMachineContext curr_context;
 	
 	unsigned int i;
 
@@ -159,8 +173,7 @@ TVMStatus VMThreadActivate(TVMThreadID thread){
                 high.push(v_tcb[i]);
 
 	//create context
-	MachineContextCreate(&curr_context, Skeleton, v_tcb[i].param, v_tcb[i].StackBase, v_tcb[i].st_size);
-	curr_context = global_new_context;	
+	MachineContextCreate(&v_tcb[i].MachineContext, Skeleton, v_tcb[i].param, v_tcb[i].StackBase, v_tcb[i].st_size);
 
 	//handle scheduling
 	if(v_tcb[i].state == VM_THREAD_STATE_WAITING)
@@ -186,7 +199,15 @@ void Scheduler(TVMThreadID thread){
 			temp = low.front().ID;	
 		}
 	}
-	MachineContextSwitch(&v_tcb[temp].MachineContext, &global_new_context);
+				 
+	v_tcb[temp].state =  VM_THREAD_STATE_RUNNING;
+	*running = v_tcb[temp];
+	MachineContextSwitch(&running->MachineContext, &v_tcb[temp].MachineContext);
+
+	if(v_tcb[temp].state == VM_THREAD_STATE_WAITING)
+		waiting.push(v_tcb[temp]);
+	else
+		ready.push(v_tcb[temp]);		
 }//Scheduler
 
 void pop_queue(TVMThreadID thread, int i){
@@ -302,8 +323,9 @@ TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 	MachineRequestAlarm(tickms*1000, AlarmCB, NULL);       //FYI could pass in a DataStructure instead of NULL
 	MachineEnableSignals();
 
-	//Create a special TCB for the main thread -> assign it to the running(global) -> pass the running into MachineSwitchContext as 1st param
-	
+	//Create a special TCB for the main thread -> assign it to be the running(global) -> pass the running into MachineSwitchContext as 1st param
+	TCB *mainThread = new TCB(VM_THREAD_PRIORITY_NORMAL, 0, NULL, NULL);
+	*running = *mainThread;	
 	//TMachineFileCallback callback
 	
 	if(main == NULL)
