@@ -5,6 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <queue>
+#include <iostream>
 
 extern "C"{
 
@@ -19,11 +20,11 @@ class TCB{
 	public:
 
 	TCB(){};
-	TCB(TVMThreadPriority prior, int memsize, TVMThreadEntry entry1, void *param1); 
+	TCB(TVMThreadPriority prior, size_t memsize, TVMThreadEntry entry1, void *param1); 
 	TVMThreadID ID;
 	TVMStatus state;	
 	TVMThreadPriority priority;
-	int st_size;
+	size_t st_size;
 	int num_ticks;	
 	uint8_t *StackBase;
 	TVMThreadEntry entry;
@@ -43,16 +44,23 @@ queue <TCB> low;
 queue <TCB> waiting;
 queue <TCB> sleeping;
 
-TCB:: TCB(TVMThreadPriority prior, int memsize, TVMThreadEntry entry1, void *param1){
+TCB:: TCB(TVMThreadPriority prior, size_t memsize, TVMThreadEntry entry1, void *param1){
 	priority = prior;
 	state = VM_THREAD_STATE_DEAD;
-	int st_size = memsize;
+	//int st_size = memsize;
+	st_size = memsize;
 	StackBase = new uint8_t[memsize];
 	entry = entry1;
 	//*(void *)param = *(void *)param1;
 	num_ticks = ticks;
 }
 
+void Skeleton(void *param){
+    //get the entry function and param that you need to call 
+//	ActualThreadEntry(ActualThreadParam);
+//	VMTerminate(ThisThreadID);// This will allow you to gain control back if the ActualThreadEntry returns
+	cout << "In Skeleton\n";	
+}//SkeletonEntry*/
 
 TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsize, TVMThreadPriority prio, TVMThreadIDRef tid){
 
@@ -120,11 +128,15 @@ TVMStatus VMThreadDelete(TVMThreadID thread){
 	return VM_STATUS_SUCCESS;
 }//ThreadDelete
 
+void Scheduler(TVMThreadID thread);
+
+SMachineContext global_new_context;
 
 TVMStatus VMThreadActivate(TVMThreadID thread){
 	TMachineSignalState OldState;
 	MachineSuspendSignals(&OldState);
-
+	SMachineContext curr_context;
+	
 	unsigned int i;
 
 	for(i = 0; i < v_tcb.size(); i++)
@@ -146,13 +158,35 @@ TVMStatus VMThreadActivate(TVMThreadID thread){
 	else
                 high.push(v_tcb[i]);
 
-	//handle scheduling
+	//create context
+	MachineContextCreate(&curr_context, Skeleton, v_tcb[i].param, v_tcb[i].StackBase, v_tcb[i].st_size);
+	curr_context = global_new_context;	
 
+	//handle scheduling
+	if(v_tcb[i].state == VM_THREAD_STATE_WAITING)
+		Scheduler(v_tcb[i].ID);
+	
 	return VM_STATUS_SUCCESS;
 }//ThreadActivate
 
 void Scheduler(TVMThreadID thread){
-	
+	TVMThreadID temp;
+
+	if(thread){
+		if(!(high.empty())){
+			high.pop();
+			temp = high.front().ID;
+		}
+		else if(!(medium.empty())){
+			medium.pop();
+			temp = medium.front().ID;
+		}
+		else{
+			low.pop();
+			temp = low.front().ID;	
+		}
+	}
+	MachineContextSwitch(&v_tcb[temp].MachineContext, &global_new_context);
 }//Scheduler
 
 void pop_queue(TVMThreadID thread, int i){
@@ -267,6 +301,8 @@ TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 	MachineInitialize(tickms);	
 	MachineRequestAlarm(tickms*1000, AlarmCB, NULL);       //FYI could pass in a DataStructure instead of NULL
 	MachineEnableSignals();
+
+	//Create a special TCB for the main thread -> assign it to the running(global) -> pass the running into MachineSwitchContext as 1st param
 	
 	//TMachineFileCallback callback
 	
@@ -284,7 +320,7 @@ TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 
 TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor){
 	
-	void *param = NULL;
+//	void *param = NULL;
 
 	if(filename == NULL || filedescriptor == NULL)	
 		return VM_STATUS_ERROR_INVALID_PARAMETER;
