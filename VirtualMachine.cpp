@@ -30,6 +30,7 @@ class TCB{
 	TVMThreadEntry entry;
 	void *param;
 	SMachineContext MachineContext; 	
+	int filereturn;
 };
 
 void idle(void *param){
@@ -432,20 +433,33 @@ TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 //VMAllThreads
 //VMSchedule
 
+void OpenCB(void* calldata, int result){
+	((TCB*)calldata)->filereturn = result;
+	((TCB*)calldata)->state = VM_THREAD_STATE_RUNNING;		
+}
 
 TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor){
-	
-//	void *param = NULL;
+	 if(filename == NULL || filedescriptor == NULL)
+                return VM_STATUS_ERROR_INVALID_PARAMETER;
 
-	if(filename == NULL || filedescriptor == NULL)	
-		return VM_STATUS_ERROR_INVALID_PARAMETER;
+	TMachineSignalState OldState;
+	MachineSuspendSignals(&OldState);
 	
-	else if((*filedescriptor = open(filename, flags, mode))>0)
-		return VM_STATUS_SUCCESS;
-	else
-		return VM_STATUS_FAILURE;	
+	void *calldata = (void*)running;
+
+	MachineFileOpen(filename, flags, mode, OpenCB, calldata);
+
+	VMThreadSleep(5);
+
+	*filedescriptor = (running->filereturn);
+
+	MachineResumeSignals(&OldState);
+	return VM_STATUS_SUCCESS;
 }//FileOpen
 
+void CloseCB(void* calldata, int result){
+
+}
 
 TVMStatus VMFileClose(int filedescriptor){
 	if((close(filedescriptor)) < 0)
@@ -454,6 +468,10 @@ TVMStatus VMFileClose(int filedescriptor){
 	else
 		return VM_STATUS_SUCCESS; 
 }//FileCLose
+
+void WriteCB(){
+
+}
 
 TVMStatus VMFileWrite(int filedescriptor, void *data, int *length){	//needs to work with machine something?
 	if(data == NULL || length == NULL)
