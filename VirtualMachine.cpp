@@ -31,6 +31,20 @@ class TCB{
 	void *param;
 	SMachineContext MachineContext; 	
 	int filereturn;
+	int acquired;
+};
+
+class MB{
+	public:
+
+	MB(){};
+	vector <TCB *> acquire;
+	vector <TCB *> acquire_l;
+	vector <TCB *> acquire_m;
+	vector <TCB *> acquire_h;
+	TVMMutexID mutexID;
+	TVMThreadID owner;
+	int lock;
 };
 
 void idle(void *param){
@@ -50,6 +64,8 @@ vector <TCB *> low;
 
 vector <TCB *> waiting;
 vector <TCB *> sleeping;
+
+vector <MB> v_mutex;
 
 void Scheduler();
 
@@ -134,6 +150,53 @@ void AlarmCB(void *param){
 		//if(i == 0)
 	}
 	//call Scheduler (?)
+	
+	TCB *newowner;
+	for(unsigned int i=0; i < v_mutex.size(); i++){
+		for(unsigned int j=0; j < v_mutex[i].acquire.size(); j++){
+			if(v_mutex[i].acquire[j]->num_ticks == 0){
+				newowner = v_mutex[i].acquire[j];
+				newowner->acquired = 0;
+				v_mutex[i].acquire.erase(v_mutex[i].acquire.begin() + j);
+			
+				if(newowner->priority == VM_THREAD_PRIORITY_HIGH){
+		               	        unsigned int k;
+               		        	for(k=0; k < v_mutex[i].acquire_h.size(); k++)
+                               			if(v_mutex[i].acquire_h[k]->ID == newowner->ID)
+                                       			break;
+			        	v_mutex[i].acquire_h.erase(v_mutex[i].acquire_h.begin() + k);
+					high.push_back(newowner);
+				}
+				else if(newowner->priority == VM_THREAD_PRIORITY_NORMAL){
+                                       	unsigned int k;
+                                       	for(k=0; k < v_mutex[i].acquire_m.size(); k++)
+                                       	        if(v_mutex[i].acquire_m[k]->ID == newowner->ID)
+                                               	        break;
+                                     	v_mutex[i].acquire_m.erase(v_mutex[i].acquire_m.begin() + k);
+				
+					medium.push_back(newowner);
+				}
+				else{
+                                       	unsigned int k;
+                                       	for(k=0; k < v_mutex[i].acquire_l.size(); k++)
+                                               	if(v_mutex[i].acquire_l[k]->ID == newowner->ID)
+                                                       	break;
+                                    	v_mutex[i].acquire_l.erase(v_mutex[i].acquire_l.begin() + k);
+	
+					low.push_back(newowner);								
+				}
+                       		if(running == v_tcb[0])
+        	                        Scheduler();
+                        	else if(newowner->priority == VM_THREAD_PRIORITY_HIGH && running->priority != VM_THREAD_PRIORITY_HIGH)
+                                		Scheduler();
+                        	else if(newowner->priority == VM_THREAD_PRIORITY_NORMAL && running->priority == VM_THREAD_PRIORITY_LOW)
+                                		Scheduler();
+				else
+					v_mutex[i].acquire[j]->num_ticks--;
+			}
+		}	
+	}
+			
 	MachineResumeSignals(&OldState);
 	Scheduler();	
 	//counter--;   //need count down timers for each sleeping thread (?)      
@@ -418,7 +481,7 @@ TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 
 	//create context for idle	
 	MachineContextCreate(&v_tcb[0]->MachineContext, Skeleton, v_tcb[0], v_tcb[0]->StackBase, v_tcb[0]->st_size);
-	//TMachineFileCallback callback
+
 
 	MachineEnableSignals();
 
@@ -435,53 +498,105 @@ TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 
 void OpenCB(void* calldata, int result){
 	((TCB*)calldata)->filereturn = result;
-	((TCB*)calldata)->state = VM_THREAD_STATE_RUNNING;		
+	((TCB*)calldata)->state = VM_THREAD_STATE_READY;
+
+	
+	unsigned int i;
+	for(i=0; i < waiting.size(); i++)
+		if(waiting[i]->ID == ((TCB*)calldata)->ID)
+	   		break;
+       
+	if(waiting[i]->priority == VM_THREAD_PRIORITY_LOW)
+                low.push_back(waiting[i]);
+	else if(waiting[i]->priority == VM_THREAD_PRIORITY_NORMAL){
+               	medium.push_back(waiting[i]);
+	}
+     	else // high priority
+      		high.push_back(waiting[i]);
+	
+	//Scheduler if higher priority has woken
+      	if(running == v_tcb[0]){
+               	waiting.erase(waiting.begin() + i);
+              	Scheduler();
+     	}
+      	else if(waiting[i]->priority == VM_THREAD_PRIORITY_HIGH && running->priority != VM_THREAD_PRIORITY_HIGH){
+            	waiting.erase(waiting.begin() + i);
+              	Scheduler();
+      	}
+      	else if(waiting[i]->priority == VM_THREAD_PRIORITY_NORMAL && running->priority == VM_THREAD_PRIORITY_LOW){
+              	waiting.erase(waiting.begin() + i);
+            	Scheduler();
+      	}
+   	else{
+           	waiting.erase(sleeping.begin() + i);
+    	}
+
 }
 
 TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor){
-	 if(filename == NULL || filedescriptor == NULL)
+	if(filename == NULL || filedescriptor == NULL)
                 return VM_STATUS_ERROR_INVALID_PARAMETER;
 
 	TMachineSignalState OldState;
 	MachineSuspendSignals(&OldState);
 	
+	running->state = VM_THREAD_STATE_WAITING;
+       	waiting.push_back(running);
 	void *calldata = (void*)running;
 
 	MachineFileOpen(filename, flags, mode, OpenCB, calldata);
+	Scheduler();
 
-	VMThreadSleep(5);
-
-	*filedescriptor = (running->filereturn);
+	if(running->filereturn < 0)
+		return VM_STATUS_FAILURE; 	
+	else
+		*filedescriptor = (running->filereturn);
 
 	MachineResumeSignals(&OldState);
 	return VM_STATUS_SUCCESS;
 }//FileOpen
 
-void CloseCB(void* calldata, int result){
-
-}
-
 TVMStatus VMFileClose(int filedescriptor){
-	if((close(filedescriptor)) < 0)
-		return VM_STATUS_FAILURE;
+	TMachineSignalState OldState;
+        MachineSuspendSignals(&OldState);
 
-	else
-		return VM_STATUS_SUCCESS; 
+        running->state = VM_THREAD_STATE_WAITING;
+	waiting.push_back(running);
+        void *calldata = (void*)running;
+
+        MachineFileClose(filedescriptor, OpenCB, calldata);
+        Scheduler();
+
+        if(running->filereturn < 0)
+                return VM_STATUS_FAILURE;
+
+        MachineResumeSignals(&OldState);
+        return VM_STATUS_SUCCESS;
+
 }//FileCLose
 
-void WriteCB(){
-
-}
 
 TVMStatus VMFileWrite(int filedescriptor, void *data, int *length){	//needs to work with machine something?
 	if(data == NULL || length == NULL)
 		return(VM_STATUS_ERROR_INVALID_PARAMETER);
 	else{
-		if((write(filedescriptor, data, *length)) < 0)
-			return(VM_STATUS_FAILURE);
+		TMachineSignalState OldState;
+		MachineSuspendSignals(&OldState);
 		
+		running->state = VM_THREAD_STATE_WAITING;
+		waiting.push_back(running);
+		void *calldata = (void*)running;
+
+		MachineFileWrite(filedescriptor, data, *length, OpenCB, calldata);
+		Scheduler();		
+
+		if(running->filereturn  < 0)
+			return(VM_STATUS_FAILURE);
 		else
-			return(VM_STATUS_SUCCESS);
+			*length = running->filereturn;
+				
+		MachineResumeSignals(&OldState);
+		return(VM_STATUS_SUCCESS);
 	}
 
 }//FileWrite
@@ -491,20 +606,227 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length){
 	if(data == NULL || length == NULL)
                 return(VM_STATUS_ERROR_INVALID_PARAMETER);
         
-	*length = read(filedescriptor, data, *length);
-	
-	if(*length == 0)
+	TMachineSignalState OldState;
+	MachineSuspendSignals(&OldState);
+
+	running->state = VM_THREAD_STATE_WAITING;
+	waiting.push_back(running);
+	void *calldata = (void*)running;
+
+	MachineFileRead(filedescriptor, data, *length, OpenCB, calldata);
+	Scheduler();
+
+	if(running->filereturn < 0)
 		return(VM_STATUS_FAILURE);
 	else
-		return(VM_STATUS_SUCCESS);
+		*length = running->filereturn;
+
+	MachineResumeSignals(&OldState);
+	return(VM_STATUS_SUCCESS);
 }//FileRead
 
 TVMStatus VMFileSeek(int filedescriptor, int offset, int whence, int *newoffset){
-	*newoffset = offset + whence;
+        TMachineSignalState OldState;
+        MachineSuspendSignals(&OldState);
 
-return VM_STATUS_SUCCESS;
+        running->state = VM_THREAD_STATE_WAITING;
+        waiting.push_back(running);
+        void *calldata = (void*)running;
+
+        MachineFileSeek(filedescriptor, offset, whence, OpenCB, calldata);
+	Scheduler();
+
+        if(running->filereturn < 0)
+                return(VM_STATUS_FAILURE);
+        else
+                *newoffset = running->filereturn;
+
+        MachineResumeSignals(&OldState);
+        return(VM_STATUS_SUCCESS);
+
 }//FileSeek
+
+TVMStatus VMMutexCreate(TVMMutexIDRef mutexref){
+	if(mutexref == NULL)
+		return VM_STATUS_ERROR_INVALID_PARAMETER;
+
+	TMachineSignalState OldState;
+	MachineSuspendSignals(&OldState);
+	
+	MB mblock;
+	*mutexref = v_mutex.size();
+	mblock.mutexID = v_mutex.size();
+	mblock.lock = 0;
+	v_mutex.push_back(mblock);	
+	
+	MachineResumeSignals(&OldState);
+
+	return VM_STATUS_SUCCESS;
+}//MutexCreate
+
+TVMStatus VMMutexDelete(TVMMutexID mutex){
+	TMachineSignalState OldState;
+        MachineSuspendSignals(&OldState);
+
+	unsigned int i;
+	for(i = 0; i < v_mutex.size(); i++)
+		if(v_mutex[i].mutexID == mutex)
+			break;
+
+	if(i == v_mutex.size())
+		return VM_STATUS_ERROR_INVALID_ID;
+	else if(v_mutex[i].lock == 1)
+		return VM_STATUS_ERROR_INVALID_PARAMETER;
+	else
+		v_mutex.erase(v_mutex.begin() + i);
+
+	MachineResumeSignals(&OldState);
+	return VM_STATUS_SUCCESS;
+}//MutexDelete
+
+TVMStatus VMMutexQuery(TVMMutexID mutex, TVMThreadIDRef ownerref){
+	if(ownerref == NULL)
+		return VM_STATUS_ERROR_INVALID_PARAMETER;
+
+	TMachineSignalState OldState;
+        MachineSuspendSignals(&OldState);
+
+	unsigned int i;
+        for(i = 0; i < v_mutex.size(); i++)
+                if(v_mutex[i].mutexID == mutex)
+                        break;
+
+	if(i == v_mutex.size())
+		return VM_STATUS_ERROR_INVALID_ID;
+	else if(v_mutex[i].lock == 1)
+		*ownerref = v_mutex[i].owner;
+	else
+		return VM_THREAD_ID_INVALID;
+	
+	MachineResumeSignals(&OldState);
+	return VM_STATUS_SUCCESS;
+}//MutexQuery
+
+TVMStatus VMMutexAcquire(TVMMutexID mutex, TVMTick timeout){
+
+	TMachineSignalState OldState;
+        MachineSuspendSignals(&OldState);
+
+	unsigned int i;
+        for(i = 0; i < v_mutex.size(); i++)
+                if(v_mutex[i].mutexID == mutex)
+                        break;
+
+        if(i == v_mutex.size())
+                return VM_STATUS_ERROR_INVALID_ID;
+
+	if(timeout == VM_TIMEOUT_IMMEDIATE)
+		if(v_mutex[i].lock == 0){
+			v_mutex[i].owner = running->ID;
+			return VM_STATUS_SUCCESS;
+		}
+		else
+			return VM_STATUS_FAILURE;
+	else{
+		if(timeout == VM_TIMEOUT_INFINITE)
+                	running->num_ticks = -1;
+		else
+			running->num_ticks = timeout;
+
+		running->state = VM_THREAD_STATE_WAITING;
+
+		if(v_mutex[i].lock == 0){
+                        v_mutex[i].owner = running->ID;
+                        return VM_STATUS_SUCCESS;
+                }
+		else{
+     			v_mutex[i].acquire.push_back(running);		
+
+			//push into right priority queue in mutex
+			if(running->priority == VM_THREAD_PRIORITY_HIGH){
+				v_mutex[i].acquire_h.push_back(running);
+			}
+			else if(running->priority == VM_THREAD_PRIORITY_NORMAL){
+				v_mutex[i].acquire_m.push_back(running);
+			}
+			else{ // low priority for mutex lock
+				v_mutex[i].acquire_l.push_back(running);
+			}
+			Scheduler();
+		}
+	}
+	MachineResumeSignals(&OldState);
+	if(running->acquired == 0)
+		return VM_STATUS_FAILURE;
+	else 
+		return VM_STATUS_SUCCESS;
+}//MutexAcquire
+
+TVMStatus VMMutexRelease(TVMMutexID mutex){
+	TMachineSignalState OldState;
+        MachineSuspendSignals(&OldState);
+
+	unsigned int i;
+	for(i = 0; i < v_mutex.size(); i++)
+                if(v_mutex[i].mutexID == mutex)
+                        break;
+
+	if(v_mutex.size() == i)
+		return VM_STATUS_ERROR_INVALID_ID;
+	else if(v_mutex[i].owner != running->ID)
+		return VM_STATUS_ERROR_INVALID_STATE;
+	else{
+		running->acquired = 0;
+		v_mutex[i].lock = 0;
+	}
+	TCB *newowner;
+                if(!v_mutex[i].acquire.empty()){
+                        if(!v_mutex[i].acquire_h.empty()){
+                                v_mutex[i].lock = 1;
+                                newowner = v_mutex[i].acquire_h[0];
+                                newowner->acquired = 1;
+                                newowner->state = VM_THREAD_STATE_READY;
+                                high.push_back(newowner);
+                                v_mutex[i].acquire_h.erase(v_mutex[i].acquire_h.begin());
+                                v_mutex[i].owner = newowner->ID;
+                        }
+                        else if(!v_mutex[i].acquire_m.empty()){
+                                v_mutex[i].lock = 1;
+                                newowner = v_mutex[i].acquire_m[0];
+                                newowner->acquired = 1;
+                                newowner->state = VM_THREAD_STATE_READY;
+                                medium.push_back(newowner);
+                                v_mutex[i].acquire_m.erase(v_mutex[i].acquire_m.begin());
+                                v_mutex[i].owner = newowner->ID;
+                        }
+                        else{ //if(!acquire_l.empty()){
+                                v_mutex[i].lock = 1;
+                                newowner = v_mutex[i].acquire_l[0];
+                                newowner->acquired = 1;
+                                newowner->state = VM_THREAD_STATE_READY;
+                                low.push_back(newowner);
+                                v_mutex[i].acquire_l.erase(v_mutex[i].acquire_l.begin());
+                                v_mutex[i].owner = newowner->ID;
+                        }
+                        unsigned int j;
+                        for(j=0; j < v_mutex[i].acquire.size(); j++)
+                                if(v_mutex[i].acquire[j]->ID == newowner->ID)
+                                        break;
+                        v_mutex[i].acquire.erase(v_mutex[i].acquire.begin() + j);
+
+
+                        if(running == v_tcb[0]){
+                                Scheduler();
+                        }
+                        else if(newowner->priority == VM_THREAD_PRIORITY_HIGH && running->priority != VM_THREAD_PRIORITY_HIGH)
+                                Scheduler();
+                        else if(newowner->priority == VM_THREAD_PRIORITY_NORMAL && running->priority == VM_THREAD_PRIORITY_LOW)
+        			Scheduler();
+		}		               
+
+	MachineResumeSignals(&OldState);
+	return VM_STATUS_SUCCESS;
+}//MutexRelease
 
 
 }//end of extern
-#include "VirtualMachine.h"
