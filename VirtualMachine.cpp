@@ -49,8 +49,8 @@ class MB{
 
 void idle(void *param){
 //	MachineEnableSignals();
-	while(1){
-	}
+	//cout << "dies in idle" << endl;
+	while(1);
 }
 
 TCB *running; //= new TCB((TVMThreadPriority)NULL, 0, (TVMThreadEntry)NULL, NULL);
@@ -81,14 +81,17 @@ TCB:: TCB(TVMThreadPriority prior, size_t memsize, TVMThreadEntry entry1, void *
 }
 
 void Skeleton(void *param1){
+	//cout << "here11" << endl;
     //get the entry function and param that you need to call 
 	MachineEnableSignals();
 	((TCB *)param1)->entry(((TCB *)param1)->param);
+	//cout << "segault happens before this" << endl;
 	VMThreadTerminate(((TCB *)param1)->ID);// This will allow you to gain control back if the ActualThreadEntry returns
 }//SkeletonEntry
 
 
 TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsize, TVMThreadPriority prio, TVMThreadIDRef tid){
+	//cout << "here10" << endl;
 	TMachineSignalState OldState;
 
 	//MachineEnableSignals();
@@ -113,6 +116,7 @@ TVMMainEntry VMLoadModule(const char *module);
 
 
 void AlarmCB(void *param){
+	//cout << "here9" << endl;
 	TMachineSignalState OldState;
 	MachineSuspendSignals(&OldState);
 	for(unsigned int i = 0; i < sleeping.size(); i++){
@@ -157,6 +161,7 @@ void AlarmCB(void *param){
 			if(v_mutex[i].acquire[j]->num_ticks == 0){
 				newowner = v_mutex[i].acquire[j];
 				newowner->acquired = 0;
+				newowner->state = VM_THREAD_STATE_READY;
 				v_mutex[i].acquire.erase(v_mutex[i].acquire.begin() + j);
 			
 				if(newowner->priority == VM_THREAD_PRIORITY_HIGH){
@@ -196,9 +201,9 @@ void AlarmCB(void *param){
 			}
 		}	
 	}
-			
-	MachineResumeSignals(&OldState);
-	Scheduler();	
+
+	Scheduler();
+	MachineResumeSignals(&OldState);	
 	//counter--;   //need count down timers for each sleeping thread (?)      
 }//AlarmCB
 
@@ -262,6 +267,7 @@ TVMStatus VMThreadDelete(TVMThreadID thread){
 //SMachineContext global_new_context;
 
 TVMStatus VMThreadActivate(TVMThreadID thread){
+	//cout << "here7" << endl;
 	TMachineSignalState OldState;
 	MachineSuspendSignals(&OldState);
 	//SMachineContext curr_context;
@@ -314,6 +320,7 @@ TVMStatus VMThreadActivate(TVMThreadID thread){
 }//ThreadActivate
 
 void Scheduler(){
+	//cout << "here6" << endl;
 	TVMThreadID temp;
 	//TMachineSignalState OldState;
 		if(!(high.empty())){
@@ -330,11 +337,11 @@ void Scheduler(){
 		}
 		else{
 			//MachineSuspendSignals(&OldState);
-			if(running->state != VM_THREAD_STATE_RUNNING){ //run idle thread now
+			if(running->state != VM_THREAD_STATE_RUNNING && running->state != VM_THREAD_STATE_READY){ //run idle thread now
 				v_tcb[0]->state = VM_THREAD_STATE_RUNNING;
 				TCB *oldstate = running;
 				running = v_tcb[0];
-				//running->ID = v_tcb[0].ID;
+				//cout << "at Machine ContextSwitch \n";
 				MachineContextSwitch(&oldstate->MachineContext, &running->MachineContext);
 				//MachineEnableSignals();
 				return;
@@ -349,9 +356,9 @@ void Scheduler(){
 		if(v_tcb[i]->ID == temp)
 			break;
 
-	v_tcb[i]->state =  VM_THREAD_STATE_RUNNING;
+	v_tcb[i]->state =  VM_THREAD_STATE_READY;
 	
-	if(running != v_tcb[0] && running->state == VM_THREAD_STATE_RUNNING){
+	if(running != v_tcb[0] && (running->state == VM_THREAD_STATE_RUNNING || running->state == VM_THREAD_STATE_READY)){
 		if(running->priority == VM_THREAD_PRIORITY_HIGH)
 			high.push_back(running);
 		else if(running->priority == VM_THREAD_PRIORITY_NORMAL)
@@ -366,6 +373,7 @@ void Scheduler(){
 	TCB *temp1 = running;
         running = v_tcb[i];
 	//MachineEnableSignals();
+	//cout << "at machine context switch NOT TO IDLE\n";
 	MachineContextSwitch(&temp1->MachineContext, &running->MachineContext);
 	//if(v_tcb[temp].state == VM_THREAD_STATE_WAITING)
 	//	waiting.push(v_tcb[temp]);		
@@ -373,7 +381,7 @@ void Scheduler(){
 
 void pop_queue(TVMThreadID thread, int i){
 	unsigned int h, m, l;
-	
+	//cout << "here5" << endl;
 	if(v_tcb[i]->ID == 0)
 		return;
 	else if(running->ID == thread)
@@ -402,6 +410,7 @@ void pop_queue(TVMThreadID thread, int i){
 }//popqueue
 
 TVMStatus VMThreadTerminate(TVMThreadID thread){
+	//cout << "here4" << endl;
 	TMachineSignalState OldState;
 	MachineSuspendSignals(&OldState);
 
@@ -414,7 +423,9 @@ TVMStatus VMThreadTerminate(TVMThreadID thread){
         if(v_tcb[i]->state == VM_THREAD_STATE_DEAD)
                 return VM_STATUS_ERROR_INVALID_STATE;
 	pop_queue(thread, i);
+	//cout << "rightbefore state change\n";
 	v_tcb[i]->state = VM_THREAD_STATE_DEAD;
+	//cout << "after state change\n";
 
 	Scheduler();
 	MachineResumeSignals(&OldState);
@@ -435,7 +446,8 @@ TVMStatus VMThreadID(TVMThreadIDRef threadref){
 
 
 TVMStatus VMThreadState(TVMThreadID thread, TVMThreadStateRef state){
-	
+	//cout << "here2" << endl;	
+
 	TMachineSignalState OldState;
 	MachineSuspendSignals(&OldState);
 	
@@ -443,10 +455,12 @@ TVMStatus VMThreadState(TVMThreadID thread, TVMThreadStateRef state){
 	if(state == NULL)
 		return VM_STATUS_ERROR_INVALID_PARAMETER;
 	
+	//cout << v_tcb.size() << endl;
 	for(i = 0; i < v_tcb.size(); i++)
                 if(v_tcb[i]->ID == thread)
                         break;
 	
+	//cout<< i << endl;
         if(i == v_tcb.size())
                 return VM_STATUS_ERROR_INVALID_ID;
 
@@ -470,7 +484,7 @@ TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 	TVMMainEntry main = VMLoadModule(arg);		
 	ticks = tickms;
 	
-	MachineInitialize(tickms);
+	MachineInitialize(machinetickms);
 	MachineRequestAlarm(tickms*1000, AlarmCB, NULL);       //FYI could pass in a DataStructure instead of NULL
 
 	//Create a special TCB for the main thread -> assign it to be the running(global) -> pass the running into MachineSwitchContext as 1st param
@@ -489,6 +503,7 @@ TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 		return(VM_STATUS_FAILURE);
 	else{
 		main(argc, argv);
+		MachineTerminate();
 		return(VM_STATUS_SUCCESS);
 	}
 }//VMStart
@@ -497,6 +512,8 @@ TVMStatus VMStart(int tickms, int machinetickms, int argc, char *argv[]){
 //VMSchedule
 
 void OpenCB(void* calldata, int result){
+	//cout << "here1" << endl;
+	////cout << "segfaults in the callback!";
 	((TCB*)calldata)->filereturn = result;
 	((TCB*)calldata)->state = VM_THREAD_STATE_READY;
 
@@ -505,15 +522,17 @@ void OpenCB(void* calldata, int result){
 	for(i=0; i < waiting.size(); i++)
 		if(waiting[i]->ID == ((TCB*)calldata)->ID)
 	   		break;
-       
+
+	//cout<< i << " " << waiting.size() << endl;
+
 	if(waiting[i]->priority == VM_THREAD_PRIORITY_LOW)
                 low.push_back(waiting[i]);
-	else if(waiting[i]->priority == VM_THREAD_PRIORITY_NORMAL){
+	else if(waiting[i]->priority == VM_THREAD_PRIORITY_NORMAL)
                	medium.push_back(waiting[i]);
-	}
-     	else // high priority
-      		high.push_back(waiting[i]);
+    else // high priority
+     		high.push_back(waiting[i]);
 	
+		//cout<<"wowowo\n";
 	//Scheduler if higher priority has woken
       	if(running == v_tcb[0]){
                	waiting.erase(waiting.begin() + i);
@@ -527,10 +546,11 @@ void OpenCB(void* calldata, int result){
               	waiting.erase(waiting.begin() + i);
             	Scheduler();
       	}
-   	else{
-           	waiting.erase(sleeping.begin() + i);
+   		else{
+   			//cout<<"here??!\n";
+           	waiting.erase(waiting.begin() + i);
+    		//cout<<"now here??!?!?\n";
     	}
-
 }
 
 TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor){
@@ -577,6 +597,7 @@ TVMStatus VMFileClose(int filedescriptor){
 
 
 TVMStatus VMFileWrite(int filedescriptor, void *data, int *length){	//needs to work with machine something?
+	//cout << "here" << endl;
 	if(data == NULL || length == NULL)
 		return(VM_STATUS_ERROR_INVALID_PARAMETER);
 	else{
@@ -587,9 +608,8 @@ TVMStatus VMFileWrite(int filedescriptor, void *data, int *length){	//needs to w
 		waiting.push_back(running);
 		void *calldata = (void*)running;
 
-		MachineFileWrite(filedescriptor, data, *length, OpenCB, calldata);
+		MachineFileWrite(filedescriptor, data, *length, OpenCB, calldata);	
 		Scheduler();		
-
 		if(running->filereturn  < 0)
 			return(VM_STATUS_FAILURE);
 		else
@@ -634,7 +654,7 @@ TVMStatus VMFileSeek(int filedescriptor, int offset, int whence, int *newoffset)
         void *calldata = (void*)running;
 
         MachineFileSeek(filedescriptor, offset, whence, OpenCB, calldata);
-	Scheduler();
+		Scheduler();
 
         if(running->filereturn < 0)
                 return(VM_STATUS_FAILURE);
